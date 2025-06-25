@@ -1,0 +1,124 @@
+clc; clear; close all;
+
+%% 축간거리 파라메터
+L1 = 100; L2 = 100; L3 = 100;
+D1 = 100; D2 = 100; D3 = 100;
+
+%% 고정계 변환행렬
+offset = [L3; L2; -L1];
+R_base = [ 0  0  1;
+           0  1  0;
+          -1  0  0 ];
+
+fprintf("좌표 입력 형식:  [x y z] (exit 입력 시 종료)\n");
+while true
+    try
+        user_in = input('INPUT EE COORD [x y z]: ', 's');
+        if strcmpi(strtrim(user_in), "exit")
+            break;
+        end
+
+        World_pos = str2num(user_in);
+        if numel(World_pos) ~= 3
+            fprintf("[x y z] 세 값으로 입력하세요.\n"); continue;
+        end
+        World_pos = World_pos(:);  % 열 벡터
+
+        %% 회전계의 베이스로 변환
+        local_pos = R_base' * (World_pos - offset);
+        x_l = local_pos(1); y_l = local_pos(2); z_l = local_pos(3);
+
+        %% --- θ1 계산 ---
+        theta1 = atan2(y_l, x_l);
+
+        % TASK SPACE 검사
+        if norm(local_pos) > (D1 + D2 + D3)
+            error("CMD EE COORD OUT OF TASK SPACE");
+        end
+
+        %% 평면 투영 / 역축 좌표계 설정
+        Swp_X = sqrt(x_l^2 + y_l^2) - D1;
+        Swp_Y = z_l;
+
+        %% --- θ3 후보 2개 ---
+        C3 = (Swp_X^2 + Swp_Y^2 - D2^2 - D3^2) / (2 * D2 * D3);
+        if abs(C3) > 1.0
+            error("C3 OUT OF RANGE: %.4f", C3);
+        end
+        S3_set = [+sqrt(1 - C3^2), -sqrt(1 - C3^2)];
+        theta3_set = atan2(S3_set, C3);
+
+        %% === 모든 조합 테스트 ===
+        best_error = inf;
+        best_angles = [];
+
+        sol_idx = 1;
+        for i = 1:2
+            S3 = S3_set(i);
+            theta3 = theta3_set(i);
+
+            % θ2 계산
+            num = (D2 + D3*C3)*Swp_X + D3*S3*Swp_Y;
+            den = (D2 + D3*C3)^2 + (D3*S3)^2;
+            C2 = num / den;
+
+            if abs(C2) > 1.0, continue; end
+            S2_set = [+sqrt(1 - C2^2), -sqrt(1 - C2^2)];
+            theta2_set = atan2(S2_set, C2);
+
+            for j = 1:2
+                theta2 = theta2_set(j);
+
+                %% --- FK ---
+                EE_world = fk_DH(theta1, theta2, theta3, D1, D2, D3, R_base, offset);
+                err_vec = World_pos - EE_world;
+                err_norm = norm(err_vec);
+
+                % 출력
+                fprintf("▼ 조합 %d: θ₁ = %.2f°, θ₂ = %.2f°, θ₃ = %.2f°\n", ...
+                    sol_idx, rad2deg(theta1), rad2deg(theta2), rad2deg(theta3));
+                fprintf("→ FK 위치: [%.2f, %.2f, %.2f], 오차 norm = %.4f\n\n", ...
+                    EE_world, err_norm);
+                sol_idx = sol_idx + 1;
+
+                % 최소 오차 해 저장
+                if err_norm < best_error
+                    best_error = err_norm;
+                    best_angles = [theta1; theta2; theta3];
+                end
+            end
+        end
+
+        %% --- 최종 선택된 해 출력 ---
+        fprintf("선택된 최적 해: θ₁ = %.2f°, θ₂ = %.2f°, θ₃ = %.2f° (오차 = %.4f)\n\n", ...
+            rad2deg(best_angles(1)), rad2deg(best_angles(2)), rad2deg(best_angles(3)), best_error);
+
+    catch ME
+        fprintf("오류 발생: %s\n\n", ME.message);
+    end
+end
+
+
+%% === FK ===
+function EE_pos = fk_DH(theta1, theta2, theta3, D1, D2, D3, R_base, offset)
+    DH_table = [ ...
+        0,    0,    0,     theta1;
+        pi/2, D1,   0,     theta2;
+        0,    D2,   0,     theta3;
+        0,    D3,   0,     0 ];
+
+    dh_transform = @(alpha, a, d, theta) [ ...
+        cos(theta), -sin(theta), 0, a;
+        sin(theta)*cos(alpha), cos(theta)*cos(alpha), -sin(alpha), -sin(alpha)*d;
+        sin(theta)*sin(alpha), cos(theta)*sin(alpha),  cos(alpha),  cos(alpha)*d;
+        0, 0, 0, 1];
+
+    T = eye(4);
+    for i = 1:size(DH_table,1)
+        A = dh_transform(DH_table(i,1), DH_table(i,2), DH_table(i,3), DH_table(i,4));
+        T = T * A;
+    end
+
+    EE_local = T(1:3, 4);
+    EE_pos = R_base * EE_local + offset;
+end
